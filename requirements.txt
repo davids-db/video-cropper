@@ -1,0 +1,20 @@
+# requirements.txt
+#
+# Pinned-ish dependencies for Cloud Run service.
+
+flask==3.0.0
+gunicorn==21.2.0
+
+requests==2.32.3
+
+google-cloud-firestore==2.16.0
+google-cloud-tasks==2.16.5
+google-cloud-storage==2.16.0
+
+# Video processing
+opencv-python-headless==4.10.0.84
+numpy==2.0.2
+
+# Person detection
+ultralytics==8.2.70
+torch==2.3.1

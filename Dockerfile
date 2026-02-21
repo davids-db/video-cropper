@@ -20,6 +20,14 @@
     WORKDIR /app
 
     COPY requirements.txt .
+    # Install CUDA-enabled PyTorch wheel (cu121 = CUDA 12.1, matches Cloud Run GPU driver).
+    # The wheel bundles libcudart/libcublas/etc; libcuda.so.1 is bind-mounted from the host
+    # by Cloud Run when --gpu 1 is set.
+    # torch 2.5.1+cu121 satisfies the torch==2.5.1 pin in requirements.txt, so pip
+    # skips it on the second install pass.
+    RUN pip install --no-cache-dir \
+          torch==2.5.1 torchvision==0.20.1 \
+          --index-url https://download.pytorch.org/whl/cu121
     RUN pip install --no-cache-dir -r requirements.txt
 
     # Optional: pre-cache YOLO weights (downloads during first run otherwise).
@@ -27,13 +35,8 @@
     ARG PRECACHE_YOLO=0
     ARG MODEL_NAME=yolov8n.pt
     RUN if [ "$PRECACHE_YOLO" = "1" ]; then \
-          python - <<'PY' ; \
-from ultralytics import YOLO
-import os
-YOLO(os.environ.get("MODEL_NAME", "yolov8n.pt"))
-print("cached") \
-PY \
-        ; fi
+          python -c "from ultralytics import YOLO; YOLO('${MODEL_NAME}'); print('cached')" ; \
+        fi
 
     COPY api.py worker.py cleanup.py video_cropper.py logging_utils.py ./
 

@@ -2,19 +2,25 @@
 #
 # Pinned-ish dependencies for Cloud Run service.
 
-flask==3.0.0
-gunicorn==21.2.0
+flask==3.1.0
+gunicorn==22.0.0
 
 requests==2.32.3
 
-google-cloud-firestore==2.16.0
+google-cloud-firestore==2.19.0
 google-cloud-tasks==2.16.5
-google-cloud-storage==2.16.0
+google-cloud-storage==2.19.0
 
 # Video processing
+# numpy must be <2.0 for torch 2.x CPU builds on python:3.11-slim;
+# torch 2.5.x+ supports numpy 2 but requires a larger image.
+# Keeping numpy 1.x avoids the incompatibility entirely.
 opencv-python-headless==4.10.0.84
-numpy==2.0.2
+numpy==1.26.4
 
 # Person detection
-ultralytics==8.2.70
-torch==2.3.1
+# torch CUDA wheel installed in Dockerfile (whl/cu121); pinned here for pip's dep resolver.
+# ultralytics 8.3+ is compatible with numpy 1.26 and torch 2.x
+ultralytics==8.3.55
+torch==2.5.1
+torchvision==0.20.1

@@ -66,15 +66,38 @@ gsutil iam ch "serviceAccount:${RUNTIME_SA_EMAIL}:objectAdmin" "gs://${BUCKET_NA
 gsutil iam ch "serviceAccount:${RUNTIME_SA_EMAIL}:legacyBucketReader" "gs://${BUCKET_NAME}" >/dev/null
 
 echo "🔑 Grant Cloud Build SA permissions..."
-gcloud projects add-iam-policy-binding "$PROJECT_ID"       --member="serviceAccount:${CLOUDBUILD_SERVICE_ACCOUNT}"       --role="roles/cloudbuild.builds.builder" >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${CLOUDBUILD_SERVICE_ACCOUNT}" \
+  --role="roles/cloudbuild.builds.builder" >/dev/null
 
-gcloud projects add-iam-policy-binding "$PROJECT_ID"       --member="serviceAccount:${CLOUDBUILD_SERVICE_ACCOUNT}"       --role="roles/artifactregistry.writer" >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${CLOUDBUILD_SERVICE_ACCOUNT}" \
+  --role="roles/artifactregistry.writer" >/dev/null
 
-gcloud projects add-iam-policy-binding "$PROJECT_ID"       --member="serviceAccount:${CLOUDBUILD_SERVICE_ACCOUNT}"       --role="roles/storage.admin" >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${CLOUDBUILD_SERVICE_ACCOUNT}" \
+  --role="roles/storage.admin" >/dev/null
 
-gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA_EMAIL"       --member="serviceAccount:${CLOUDBUILD_SERVICE_ACCOUNT}"       --role="roles/iam.serviceAccountUser"       --project="$PROJECT_ID" >/dev/null
+# Newer GCP projects use the Compute Engine default SA for Cloud Build source uploads.
+# Grant storage.admin so "gcloud run deploy --source ." can read/write the staging bucket.
+echo "🔑 Grant Compute Engine default SA storage access (needed for Cloud Build source upload)..."
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${COMPUTE_ENGINE_SA}" \
+  --role="roles/storage.admin" >/dev/null
 
-gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA_EMAIL"       --member="serviceAccount:${COMPUTE_ENGINE_SA}"       --role="roles/iam.serviceAccountUser"       --project="$PROJECT_ID" >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${COMPUTE_ENGINE_SA}" \
+  --role="roles/artifactregistry.writer" >/dev/null
+
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA_EMAIL" \
+  --member="serviceAccount:${CLOUDBUILD_SERVICE_ACCOUNT}" \
+  --role="roles/iam.serviceAccountUser" \
+  --project="$PROJECT_ID" >/dev/null
+
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA_EMAIL" \
+  --member="serviceAccount:${COMPUTE_ENGINE_SA}" \
+  --role="roles/iam.serviceAccountUser" \
+  --project="$PROJECT_ID" >/dev/null
 
 echo "🔐 Fix for Cloud Tasks OIDC: allow runtime SA to 'actAs' the invoker SA..."
 gcloud iam service-accounts add-iam-policy-binding "$TASKS_INVOKER_SA_EMAIL"       --member="serviceAccount:${RUNTIME_SA_EMAIL}"       --role="roles/iam.serviceAccountUser"       --project="$PROJECT_ID" >/dev/null
@@ -82,12 +105,31 @@ gcloud iam service-accounts add-iam-policy-binding "$TASKS_INVOKER_SA_EMAIL"    
 echo "🔐 Allow Cloud Tasks service agent to mint OIDC tokens for invoker SA..."
 gcloud iam service-accounts add-iam-policy-binding "$TASKS_INVOKER_SA_EMAIL"       --member="serviceAccount:${CLOUDTASKS_SERVICE_AGENT}"       --role="roles/iam.serviceAccountTokenCreator"       --project="$PROJECT_ID" >/dev/null || true
 
-echo "👤 Grant your user account permission to impersonate the runtime SA for testing..."
+echo "👤 Grant your user account permissions for testing and observability..."
 CURRENT_USER="$(gcloud config get-value account)"
-gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA_EMAIL"       --member="user:${CURRENT_USER}"       --role="roles/iam.serviceAccountTokenCreator"       --project "$PROJECT_ID" >/dev/null 2>/dev/null || true
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA_EMAIL" \
+  --member="user:${CURRENT_USER}" \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  --project "$PROJECT_ID" >/dev/null 2>/dev/null || true
 
-echo "📬 Ensure Cloud Tasks queue exists..."
-gcloud tasks queues create "$QUEUE_NAME"       --location="$REGION"       --project="$PROJECT_ID" >/dev/null 2>/dev/null || true
+# Logs Viewer: lets the deployer read Cloud Build and Cloud Run logs.
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="user:${CURRENT_USER}" \
+  --role="roles/logging.viewer" >/dev/null 2>/dev/null || true
+
+MAX_INSTANCES="${MAX_INSTANCES:-1}"
+
+echo "📬 Ensure Cloud Tasks queue exists (max-concurrent-dispatches=${MAX_INSTANCES})..."
+# Create queue if it doesn't exist (errors are silenced).
+gcloud tasks queues create "$QUEUE_NAME" \
+  --location="$REGION" \
+  --project="$PROJECT_ID" >/dev/null 2>/dev/null || true
+# Always update to enforce the concurrent-dispatch limit so it matches MAX_INSTANCES.
+# This prevents multiple /process requests hitting the same GPU instance simultaneously.
+gcloud tasks queues update "$QUEUE_NAME" \
+  --location="$REGION" \
+  --max-concurrent-dispatches="${MAX_INSTANCES}" \
+  --project="$PROJECT_ID" >/dev/null
 
 echo
 echo "✅ Base permissions done."

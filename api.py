@@ -31,6 +31,7 @@ from typing import Any, Dict
 from flask import Flask, request, jsonify
 from google.cloud import firestore
 from google.cloud import tasks_v2
+from google.protobuf import duration_pb2
 
 from worker import worker_bp
 from cleanup import cleanup_bp
@@ -72,6 +73,7 @@ def create_app() -> Flask:
         smooth_alpha=float(os.environ.get("SMOOTH_ALPHA", "0.85")),
         keep_aspect=os.environ.get("KEEP_ASPECT", "1") not in ("0", "false", "False"),
         draw_timestamp=os.environ.get("DRAW_TIMESTAMP", "1") not in ("0", "false", "False"),
+        detect_batch_size=int(os.environ.get("DETECT_BATCH_SIZE", "8")),
     )
 
     # Clients
@@ -107,12 +109,25 @@ def create_app() -> Flask:
     def health() -> Any:
         return jsonify({"ok": True}), 200
 
+    @app.get("/gpu")
+    def gpu_info() -> Any:
+        import torch
+        cuda_available = torch.cuda.is_available()
+        info: Dict[str, Any] = {"cuda_available": cuda_available}
+        if cuda_available:
+            info["device_count"] = torch.cuda.device_count()
+            info["device_name"] = torch.cuda.get_device_name(0)
+            info["memory_total_mb"] = round(torch.cuda.get_device_properties(0).total_memory / 1024 ** 2)
+        return jsonify(info), 200
+
     @app.post("/submit")
     def submit() -> Any:
         data: Dict[str, Any] = request.get_json(silent=True) or {}
         uri = data.get("uri")
         if not uri:
             return jsonify({"error": "Missing required field: uri"}), 400
+        if not (uri.startswith("gs://") or uri.startswith("http://") or uri.startswith("https://")):
+            return jsonify({"error": "Invalid URI scheme; expected gs://, http://, or https://"}), 400
 
         missing = [
             name
@@ -153,7 +168,11 @@ def create_app() -> Flask:
                     "audience": service_url,
                 },
                 "body": json.dumps({"job_id": job_id}).encode(),
-            }
+            },
+            # Max dispatch deadline for HTTP targets (30 min). Cloud Tasks will not
+            # retry the task until this deadline has elapsed, preventing duplicate
+            # processing of long-running jobs.
+            "dispatch_deadline": duration_pb2.Duration(seconds=1800),
         }
         tasks_client.create_task(parent=parent, task=task)
 

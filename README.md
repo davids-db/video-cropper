@@ -110,6 +110,80 @@ export CLEANUP_TOKEN="..."
 gcloud firestore databases create --location=us-central1
 ```
 
+## Viewing logs
+
+### Cloud Run runtime logs (service errors, job progress)
+
+```bash
+# Stream live (requires gcloud alpha component):
+gcloud alpha run services logs tail video-cropper-service --region=us-central1
+
+# Pull the last 50 lines:
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="video-cropper-service"' \
+  --limit=50 --order=desc \
+  --format='table(timestamp,severity,jsonPayload.message)' \
+  --project=$(gcloud config get-value project)
+
+# Filter to errors only:
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="video-cropper-service" AND severity>=ERROR' \
+  --limit=20 --order=desc \
+  --format='table(timestamp,severity,jsonPayload.message,jsonPayload.exc)' \
+  --project=$(gcloud config get-value project)
+```
+
+### Cloud Build logs (container build failures)
+
+```bash
+# Find the most recent build ID:
+BUILD_ID=$(gcloud builds list --region=us-central1 --limit=1 --format='value(id)')
+
+# Stream it live while a build is running:
+gcloud builds log --stream "$BUILD_ID" --region=us-central1
+
+# Pull after it completes:
+gcloud builds log "$BUILD_ID" --region=us-central1
+
+# Pull via Cloud Logging (works even when the builds log bucket is missing):
+gcloud logging read \
+  "resource.type=\"build\" AND resource.labels.build_id=\"${BUILD_ID}\"" \
+  --limit=200 --order=asc \
+  --format='value(textPayload)' \
+  --project=$(gcloud config get-value project)
+```
+
+### Log levels
+
+Set the `LOG_LEVEL` env var to control verbosity (default `INFO`):
+
+| Value     | What you see                                              |
+|-----------|-----------------------------------------------------------|
+| `DEBUG`   | Per-frame detection results, all internal steps           |
+| `INFO`    | Job start/complete, video info, frame progress every 60   |
+| `WARNING` | Only unexpected conditions                                |
+| `ERROR`   | Only failures                                             |
+
+Update the running service without redeploying:
+```bash
+gcloud run services update video-cropper-service \
+  --region=us-central1 \
+  --update-env-vars LOG_LEVEL=DEBUG
+```
+
+### Key log events to watch for
+
+| Event | What it means |
+|---|---|
+| `run_start` | Worker picked up a job and started downloading |
+| `video_info` | Input video opened; shows fps/dimensions/frame count |
+| `loading_model` | YOLO model being loaded (first job per container only) |
+| `processed_frames n=60` | Progress heartbeat every 60 frames |
+| `run_complete elapsed_s=...` | Job finished; elapsed wall time in seconds |
+| `job_complete` | Firestore updated to `done`, output URI confirmed |
+| `job_failed_processing_error` | Known error (bad video, bad URI, etc.) |
+| `job_failed_unexpected` | Unhandled exception — check the `exc` field for the traceback |
+
 ## Local dev quickstart
 ```bash
 python -m venv .venv

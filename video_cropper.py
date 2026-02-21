@@ -10,16 +10,18 @@ Core pipeline:
   - upload output back to storage (same bucket/path for gs:// inputs, or OUTPUT_BUCKET for http inputs)
 
 Notes:
-- This implementation uses Ultralytics YOLO (torch-based). For CPU-only Cloud Run,
-  keep the model small (default: yolov8n.pt) and set max-instances=1, concurrency=1.
+- This implementation uses Ultralytics YOLO (torch-based) on a GPU Cloud Run instance.
+  Keep max-instances=1 per GPU; concurrency=8 allows status/health requests alongside processing.
 """
 
 from __future__ import annotations
 
 import os
 import math
+import time
 import shutil
 import logging
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
@@ -46,6 +48,7 @@ class CropperConfig:
     model_name: str = "yolov8n.pt"  # downloaded automatically by ultralytics
     conf: float = 0.25
     iou: float = 0.5
+    detect_batch_size: int = 8  # frames per YOLO call; larger = more GPU parallelism
 
     # Crop behavior
     padding_ratio: float = 0.12   # padding around union-of-people box relative to box size
@@ -149,30 +152,41 @@ class PersonDetector:
             self._model = YOLO(self._cfg.model_name)
         return self._model
 
-    def detect_union_xyxy(self, frame_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-        """
-        Returns union bounding box for detected persons in XYXY pixel coords.
-        """
-        model = self._load()
+    @staticmethod
+    def _boxes_to_union(res_item) -> Optional[Tuple[int, int, int, int]]:
+        if res_item.boxes is None or len(res_item.boxes) == 0:
+            return None
+        boxes = res_item.boxes.xyxy.cpu().numpy()
+        return (
+            int(np.min(boxes[:, 0])),
+            int(np.min(boxes[:, 1])),
+            int(np.max(boxes[:, 2])),
+            int(np.max(boxes[:, 3])),
+        )
 
-        # Ultralytics accepts BGR numpy arrays; internally converts.
-        res = model.predict(
-            frame_bgr,
-            classes=[0],  # person
+    def detect_union_xyxy_batch(
+        self, frames_bgr: list
+    ) -> list:
+        """
+        Run YOLO on a list of frames in one batched call.
+        Returns a list of Optional[Tuple[x1,y1,x2,y2]], one per frame.
+        Uses fp16 automatically when CUDA is available.
+        """
+        import torch
+        model = self._load()
+        results = model.predict(
+            frames_bgr,
+            classes=[0],
             conf=self._cfg.conf,
             iou=self._cfg.iou,
             verbose=False,
+            half=torch.cuda.is_available(),
         )
+        return [self._boxes_to_union(r) for r in results]
 
-        if not res or res[0].boxes is None or len(res[0].boxes) == 0:
-            return None
-
-        boxes = res[0].boxes.xyxy.cpu().numpy()
-        x1 = float(np.min(boxes[:, 0]))
-        y1 = float(np.min(boxes[:, 1]))
-        x2 = float(np.max(boxes[:, 2]))
-        y2 = float(np.max(boxes[:, 3]))
-        return int(x1), int(y1), int(x2), int(y2)
+    def detect_union_xyxy(self, frame_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """Single-frame convenience wrapper around the batch method."""
+        return self.detect_union_xyxy_batch([frame_bgr])[0]
 
 
 class CropWindowSmoother:
@@ -209,6 +223,9 @@ class VideoCropper:
         self.smoother = CropWindowSmoother(cfg.smooth_alpha)
 
     def run(self, input_uri: str) -> Dict[str, Any]:
+        # Reset smoother so state from a previous job doesn't bleed into this one.
+        self.smoother = CropWindowSmoother(self.cfg.smooth_alpha)
+
         job_tmp = tempfile.mkdtemp(prefix="video-crop-", dir=self.cfg.tmp_dir)
         in_path = os.path.join(job_tmp, "input.mp4")
         out_path = os.path.join(job_tmp, "output.mp4")
@@ -218,10 +235,14 @@ class VideoCropper:
 
         meta = {"input_uri": input_uri, "output_uri": output_uri}
 
+        self.logger.info("run_start input_uri=%s output_uri=%s", input_uri, output_uri)
+        t0 = time.monotonic()
         try:
             self.io.download(input_uri, in_path)
             self._process_video(in_path, out_path)
             self.io.upload(out_path, output_uri)
+            elapsed = time.monotonic() - t0
+            self.logger.info("run_complete output_uri=%s elapsed_s=%.1f", output_uri, elapsed)
             return meta
         finally:
             shutil.rmtree(job_tmp, ignore_errors=True)
@@ -238,44 +259,85 @@ class VideoCropper:
 
         self.logger.info("video_info fps=%.3f w=%d h=%d frames=%d", fps, width, height, frame_count)
 
-        # Use mp4v; broadly supported on Cloud Run.
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
-        if not writer.isOpened():
-            cap.release()
-            raise ProcessingError("Failed to open output VideoWriter")
+        # Pipe raw BGR frames directly into ffmpeg to encode H.264 and mux original audio.
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-s", f"{width}x{height}",
+            "-pix_fmt", "bgr24",
+            "-r", str(fps),
+            "-i", "pipe:0",   # processed frames from stdin
+            "-i", in_path,    # original file for audio track
+            "-map", "0:v:0",
+            "-map", "1:a?",   # optional: copy audio if present
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-movflags", "+faststart",
+            "-c:a", "aac",
+            "-shortest",
+            out_path,
+        ]
 
-        try:
-            idx = 0
-            while True:
-                ok, frame = cap.read()
-                if not ok:
-                    break
+        # Use a TemporaryFile for stderr to avoid pipe-buffer deadlock:
+        # ffmpeg writes progress to stderr; if the 64 KB pipe buffer fills while
+        # the main thread is blocked on proc.stdin.write(), both sides deadlock.
+        with tempfile.TemporaryFile() as stderr_f:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr_f)
+            try:
+                batch_size = self.cfg.detect_batch_size
+                buf: list = []   # [(frame_idx, frame), ...]
+                idx = 0
+                last_logged = 0
 
-                crop = self._compute_crop(frame)
-                cropped = self._crop_and_letterbox(frame, crop, (width, height))
+                while True:
+                    ok, frame = cap.read()
+                    if not ok:
+                        if buf:
+                            self._write_batch(buf, proc, width, height, fps)
+                        break
 
-                if self.cfg.draw_timestamp:
-                    self._draw_timestamp(cropped, idx, fps)
+                    buf.append((idx, frame))
+                    idx += 1
 
-                writer.write(cropped)
+                    if len(buf) >= batch_size:
+                        self._write_batch(buf, proc, width, height, fps)
+                        buf = []
+                        if idx - last_logged >= 60:
+                            self.logger.info("processed_frames n=%d", idx)
+                            last_logged = idx
 
-                idx += 1
-                if idx % 60 == 0:
-                    self.logger.info("processed_frames n=%d", idx)
-        finally:
-            cap.release()
-            writer.release()
+            except Exception:
+                proc.kill()
+                proc.wait()
+                raise
+            finally:
+                cap.release()
 
-    def _compute_crop(self, frame: np.ndarray) -> Tuple[int, int, int, int]:
-        h, w = frame.shape[:2]
-        det = self.detector.detect_union_xyxy(frame)
+            proc.stdin.close()
+            proc.wait()
+            if proc.returncode != 0:
+                stderr_f.seek(0)
+                raise ProcessingError(
+                    f"ffmpeg encode failed: {stderr_f.read().decode(errors='replace')[-800:]}"
+                )
 
+    def _write_batch(self, buf: list, proc, width: int, height: int, fps: float) -> None:
+        """Run YOLO on a batch of frames and pipe cropped output to ffmpeg."""
+        frames = [f for _, f in buf]
+        dets = self.detector.detect_union_xyxy_batch(frames)
+        for (fidx, frame), det in zip(buf, dets):
+            crop = self._compute_crop(det, frame.shape[1], frame.shape[0])
+            cropped = self._crop_and_letterbox(frame, crop, (width, height))
+            if self.cfg.draw_timestamp:
+                self._draw_timestamp(cropped, fidx, fps)
+            proc.stdin.write(cropped.tobytes())
+
+    def _compute_crop(
+        self, det: Optional[Tuple[int, int, int, int]], w: int, h: int
+    ) -> Tuple[int, int, int, int]:
         if det is None:
-            prev = self.smoother.get()
-            if prev is not None:
-                x1, y1, x2, y2 = prev
-                return int(x1), int(y1), int(x2), int(y2)
+            # No persons in this frame — return the full frame unchanged.
             return 0, 0, w, h
 
         x1, y1, x2, y2 = det
@@ -378,14 +440,22 @@ class VideoCropper:
         ms = int((t - int(t)) * 1000)
         label = f"{hh:02d}:{mm:02d}:{ss:02d}.{ms:03d}"
 
-        h, w = frame.shape[:2]
+        _h, w = frame.shape[:2]
         margin = int(self.cfg.timestamp_margin_px)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        (tw, th), baseline = cv2.getTextSize(label, font, self.cfg.timestamp_font_scale, self.cfg.timestamp_thickness)
+        (tw, th), baseline = cv2.getTextSize(
+            label, font, self.cfg.timestamp_font_scale, self.cfg.timestamp_thickness
+        )
         x = max(margin, w - margin - tw)
-        y = max(margin + th, margin + th)
+        y = margin + th  # baseline sits just below the top margin
 
         # Draw a filled background rectangle for readability.
-        cv2.rectangle(frame, (x - 6, y - th - 6), (x + tw + 6, y + baseline + 6), (0, 0, 0), thickness=-1)
-        cv2.putText(frame, label, (x, y), font, self.cfg.timestamp_font_scale, (255, 255, 255), self.cfg.timestamp_thickness, cv2.LINE_AA)
+        cv2.rectangle(
+            frame, (x - 6, y - th - 6), (x + tw + 6, y + baseline + 6), (0, 0, 0), thickness=-1
+        )
+        cv2.putText(
+            frame, label, (x, y), font,
+            self.cfg.timestamp_font_scale, (255, 255, 255),
+            self.cfg.timestamp_thickness, cv2.LINE_AA,
+        )

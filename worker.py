@@ -74,6 +74,16 @@ def process() -> Any:
         return jsonify({"ok": False, "error": "Job not found"}), 404
 
     job = snap.to_dict() or {}
+
+    # Idempotency guard: Cloud Tasks may retry a task after a timeout.
+    # - "done": already completed, skip entirely.
+    # - "processing": another worker is actively running this job; return 200 so
+    #   Cloud Tasks does not keep retrying. Stalled "processing" jobs are reset by
+    #   the cleanup endpoint (STALLED_MINUTES config).
+    if job.get("status") in ("done", "processing"):
+        logger.info("job_already_active job_id=%s status=%s", job_id, job.get("status"))
+        return jsonify({"ok": True}), 200
+
     uri = job.get("uri")
     if not uri:
         doc_ref.update({"status": "failed", "error": "Job missing uri", "updated_at_ts": now_utc()})
@@ -81,6 +91,7 @@ def process() -> Any:
 
     # Mark processing
     doc_ref.update({"status": "processing", "updated_at_ts": now_utc()})
+    logger.info("job_start job_id=%s uri=%s", job_id, uri)
 
     try:
         cropper = get_cropper()
@@ -92,6 +103,7 @@ def process() -> Any:
                 "updated_at_ts": now_utc(),
             }
         )
+        logger.info("job_complete job_id=%s output_uri=%s", job_id, meta["output_uri"])
         return jsonify({"ok": True}), 200
     except ProcessingError as e:
         logger.exception("job_failed_processing_error job_id=%s", job_id)

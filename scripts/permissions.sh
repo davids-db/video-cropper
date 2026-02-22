@@ -36,7 +36,7 @@ CLOUDTASKS_SERVICE_AGENT="service-${PROJECT_NUMBER}@gcp-sa-cloudtasks.iam.gservi
 CLOUDBUILD_SERVICE_ACCOUNT="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
 COMPUTE_ENGINE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
-BUCKET_NAME="${PROJECT_ID}-video-cropper-bucket"
+BUCKET_NAME="${PROJECT_ID}-video-cropper-eu-bucket"
 
 echo "🔧 Enabling APIs..."
 gcloud services enable       run.googleapis.com       cloudbuild.googleapis.com       artifactregistry.googleapis.com       firestore.googleapis.com       cloudtasks.googleapis.com       cloudscheduler.googleapis.com       storage.googleapis.com       --project "$PROJECT_ID"

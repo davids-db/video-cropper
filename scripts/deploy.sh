@@ -59,7 +59,7 @@ SMOOTH_ALPHA="${SMOOTH_ALPHA:-0.85}"
 KEEP_ASPECT="${KEEP_ASPECT:-1}"
 DRAW_TIMESTAMP="${DRAW_TIMESTAMP:-1}"
 DETECT_BATCH_SIZE="${DETECT_BATCH_SIZE:-4}"  # 8 triggers NMS timeout on CPU; use 8+ only with GPU
-OUTPUT_BUCKET="${OUTPUT_BUCKET:-${PROJECT_ID}-video-cropper-bucket}"
+OUTPUT_BUCKET="${OUTPUT_BUCKET:-${PROJECT_ID}-video-cropper-eu-bucket}"
 USE_GPU="${USE_GPU:-1}"  # set USE_GPU=0 to deploy without GPU (e.g. while quota is pending)
 
 BUILD_ARGS=()

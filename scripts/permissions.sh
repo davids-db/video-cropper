@@ -15,7 +15,7 @@
 set -euo pipefail
 
 PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-europe-west1}"
 QUEUE_NAME="${QUEUE_NAME:-video-cropper-queue}"
 ENV_FILE="${ENV_FILE:-.env.cloudrun}"
 

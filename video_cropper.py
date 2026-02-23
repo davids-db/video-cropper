@@ -23,6 +23,8 @@ import shutil
 import logging
 import subprocess
 import tempfile
+import threading
+import queue as Q
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
 
@@ -257,6 +259,9 @@ class VideoCropper:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
+        if width == 0 or height == 0:
+            raise ProcessingError(f"Invalid video dimensions: {width}x{height}")
+
         self.logger.info("video_info fps=%.3f w=%d h=%d frames=%d", fps, width, height, frame_count)
 
         # Pipe raw BGR frames directly into ffmpeg to encode H.264 and mux original audio.
@@ -279,40 +284,60 @@ class VideoCropper:
             out_path,
         ]
 
-        # Use a TemporaryFile for stderr to avoid pipe-buffer deadlock:
-        # ffmpeg writes progress to stderr; if the 64 KB pipe buffer fills while
-        # the main thread is blocked on proc.stdin.write(), both sides deadlock.
-        with tempfile.TemporaryFile() as stderr_f:
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr_f)
-            try:
-                batch_size = self.cfg.detect_batch_size
-                buf: list = []   # [(frame_idx, frame), ...]
-                idx = 0
-                last_logged = 0
+        # Producer-consumer: a reader thread pre-fetches batches of frames while
+        # the main thread runs YOLO inference on the GPU. This keeps the GPU fed
+        # instead of stalling on sequential cap.read() calls.
+        # TemporaryFile for ffmpeg stderr avoids the 64 KB pipe-buffer deadlock.
+        batch_size = self.cfg.detect_batch_size
+        frame_queue: Q.Queue = Q.Queue(maxsize=4)  # buffer up to 4 batches ahead
 
+        def _reader() -> None:
+            buf: list = []
+            idx = 0
+            try:
                 while True:
                     ok, frame = cap.read()
                     if not ok:
                         if buf:
-                            self._write_batch(buf, proc, width, height, fps)
+                            frame_queue.put(buf)
+                        frame_queue.put(None)  # sentinel: no more batches
                         break
-
                     buf.append((idx, frame))
                     idx += 1
-
                     if len(buf) >= batch_size:
-                        self._write_batch(buf, proc, width, height, fps)
+                        frame_queue.put(buf)
                         buf = []
-                        if idx - last_logged >= 60:
-                            self.logger.info("processed_frames n=%d", idx)
-                            last_logged = idx
+            except Exception as exc:
+                frame_queue.put(exc)  # propagate errors to main thread
 
+        reader_thread = threading.Thread(target=_reader, daemon=True)
+        reader_thread.start()
+
+        with tempfile.TemporaryFile() as stderr_f:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr_f)
+            try:
+                total = 0
+                last_logged = 0
+                while True:
+                    item = frame_queue.get()
+                    if item is None:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    self._write_batch(item, proc, width, height, fps)
+                    total += len(item)
+                    if total - last_logged >= 64:
+                        self.logger.info("processed_frames n=%d", total)
+                        last_logged = total
             except Exception:
                 proc.kill()
                 proc.wait()
                 raise
             finally:
                 cap.release()
+                reader_thread.join(timeout=5)
+                if reader_thread.is_alive():
+                    self.logger.warning("reader_thread_timeout — frame reader did not exit cleanly")
 
             proc.stdin.close()
             proc.wait()

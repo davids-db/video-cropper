@@ -14,7 +14,7 @@
 set -euo pipefail
 
 PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-europe-west1}"
 SERVICE_NAME="${SERVICE_NAME:-video-cropper-service}"
 SERVICE_URL="${SERVICE_URL:-}"
 

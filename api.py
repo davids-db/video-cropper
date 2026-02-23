@@ -118,6 +118,9 @@ def create_app() -> Flask:
             info["device_count"] = torch.cuda.device_count()
             info["device_name"] = torch.cuda.get_device_name(0)
             info["memory_total_mb"] = round(torch.cuda.get_device_properties(0).total_memory / 1024 ** 2)
+            info["memory_used_mb"] = round(torch.cuda.memory_allocated(0) / 1024 ** 2)
+            info["memory_reserved_mb"] = round(torch.cuda.memory_reserved(0) / 1024 ** 2)
+            info["memory_free_mb"] = info["memory_total_mb"] - info["memory_reserved_mb"]
         return jsonify(info), 200
 
     @app.post("/submit")

@@ -58,7 +58,7 @@ MIN_CROP_RATIO="${MIN_CROP_RATIO:-0.35}"
 SMOOTH_ALPHA="${SMOOTH_ALPHA:-0.85}"
 KEEP_ASPECT="${KEEP_ASPECT:-1}"
 DRAW_TIMESTAMP="${DRAW_TIMESTAMP:-1}"
-DETECT_BATCH_SIZE="${DETECT_BATCH_SIZE:-4}"  # 8 triggers NMS timeout on CPU; use 8+ only with GPU
+DETECT_BATCH_SIZE="${DETECT_BATCH_SIZE:-32}"  # 32 for GPU (L4 has 22GB); use 4 for CPU (USE_GPU=0)
 OUTPUT_BUCKET="${OUTPUT_BUCKET:-${PROJECT_ID}-video-cropper-eu-bucket}"
 USE_GPU="${USE_GPU:-1}"  # set USE_GPU=0 to deploy without GPU (e.g. while quota is pending)
 
@@ -80,7 +80,7 @@ else
 fi
 
 echo "🚀 Deploying Cloud Run service..."
-gcloud run deploy "$SERVICE_NAME"       --source .       --region "$REGION"       --platform managed       --service-account "$RUNTIME_SA_EMAIL"       --memory "${MEMORY}"       --cpu 4       "${GPU_ARGS[@]}"       --min-instances 0       --timeout 3600       --max-instances "${MAX_INSTANCES}"       --concurrency 8       "${BUILD_ARGS[@]}"       --set-env-vars "PROJECT_ID=${PROJECT_ID},REGION=${REGION},TASKS_QUEUE=${QUEUE_NAME},PROCESS_TOKEN=${PROCESS_TOKEN},CLEANUP_TOKEN=${CLEANUP_TOKEN},RETENTION_DAYS=${RETENTION_DAYS},STALLED_MINUTES=${STALLED_MINUTES},TASKS_INVOKER_SA_EMAIL=${TASKS_INVOKER_SA_EMAIL},MODEL_NAME=${MODEL_NAME},CONF=${CONF},IOU=${IOU},PADDING_RATIO=${PADDING_RATIO},MIN_CROP_RATIO=${MIN_CROP_RATIO},SMOOTH_ALPHA=${SMOOTH_ALPHA},KEEP_ASPECT=${KEEP_ASPECT},DRAW_TIMESTAMP=${DRAW_TIMESTAMP},DETECT_BATCH_SIZE=${DETECT_BATCH_SIZE},OUTPUT_BUCKET=${OUTPUT_BUCKET}"       --project "$PROJECT_ID"
+gcloud run deploy "$SERVICE_NAME"       --source .       --region "$REGION"       --platform managed       --service-account "$RUNTIME_SA_EMAIL"       --memory "${MEMORY}"       --cpu 4       "${GPU_ARGS[@]}"       --min-instances 0       --timeout 3600       --max-instances "${MAX_INSTANCES}"       --concurrency 16       "${BUILD_ARGS[@]}"       --set-env-vars "PROJECT_ID=${PROJECT_ID},REGION=${REGION},TASKS_QUEUE=${QUEUE_NAME},PROCESS_TOKEN=${PROCESS_TOKEN},CLEANUP_TOKEN=${CLEANUP_TOKEN},RETENTION_DAYS=${RETENTION_DAYS},STALLED_MINUTES=${STALLED_MINUTES},TASKS_INVOKER_SA_EMAIL=${TASKS_INVOKER_SA_EMAIL},MODEL_NAME=${MODEL_NAME},CONF=${CONF},IOU=${IOU},PADDING_RATIO=${PADDING_RATIO},MIN_CROP_RATIO=${MIN_CROP_RATIO},SMOOTH_ALPHA=${SMOOTH_ALPHA},KEEP_ASPECT=${KEEP_ASPECT},DRAW_TIMESTAMP=${DRAW_TIMESTAMP},DETECT_BATCH_SIZE=${DETECT_BATCH_SIZE},OUTPUT_BUCKET=${OUTPUT_BUCKET}"       --project "$PROJECT_ID"
 
 SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME"       --region "$REGION"       --format='value(status.url)'       --project "$PROJECT_ID")"
 
